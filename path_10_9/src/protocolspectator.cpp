@@ -23,7 +23,7 @@
 #include "protocolspectator.h"
 
 #include "outputmessage.h"
-#include "ctype.h"
+
 #include "tile.h"
 #include "player.h"
 #include "chat.h"
@@ -240,20 +240,20 @@ void ProtocolSpectator::login(const std::string& liveCastName, const std::string
 	//dispatcher thread
 	auto foundPlayer = g_game.getPlayerByName(liveCastName);
 	if (!foundPlayer || foundPlayer->isRemoved()) {
-		disconnectSpectator("This cast no longer exists. Please relogin to refresh the list.");
+		disconnectSpectator("Live cast no longer exists. Please relogin to refresh the list.");
 		return;
 	}
 
 	const auto liveCasterProtocol = ProtocolGame::getLiveCast(foundPlayer);
 	if (!liveCasterProtocol) {
-		disconnectSpectator("This cast no longer exists. Please relogin to refresh the list.");
+		disconnectSpectator("Live cast no longer exists. Please relogin to refresh the list.");
 		return;
 	}
 
 	const auto& liveCastPassword = liveCasterProtocol->getLiveCastPassword();
 	if (liveCasterProtocol->isLiveCaster()) {
 		if (!liveCastPassword.empty() && password != liveCastPassword) {
-			disconnectSpectator("This cast is protected and you are setting the wrong password.");
+			disconnectSpectator("Wrong live cast password.");
 			return;
 		}
 
@@ -270,7 +270,7 @@ void ProtocolSpectator::login(const std::string& liveCastName, const std::string
 
 		liveCasterProtocol->addSpectator(std::static_pointer_cast<ProtocolSpectator>(shared_from_this()));
 	} else {
-		disconnectSpectator("This cast no longer exists. Please relogin to refresh the list.");
+		disconnectSpectator("Live cast no longer exists. Please relogin to refresh the list.");
 	}
 }
 
@@ -279,7 +279,6 @@ void ProtocolSpectator::logout()
 	acceptPackets = false;
 	if (client && player) {
 		client->removeSpectator(std::static_pointer_cast<ProtocolSpectator>(shared_from_this()));
-		player->sendTextMessage(MESSAGE_STATUS_CONSOLE_ORANGE, "One viewer has been left from your cast.");
 		player->decrementReferenceCounter();
 		player = nullptr;
 	}
@@ -309,22 +308,15 @@ void ProtocolSpectator::parsePacket(NetworkMessage& msg)
 	}
 
 	switch (recvbyte) {
-		case 0x14: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::logout, this))); break;
-		case 0x1D: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::sendPingBack, this))); break;
-		case 0x1E: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::sendPing, this))); break;
-		case 0x64: sendCancelWalk(); break;
-		case 0x65: sendCancelWalk(); break;
-		case 0x66: sendCancelWalk(); break;
-		case 0x67: sendCancelWalk(); break;
-		case 0x68: sendCancelWalk(); break;
-		case 0x69: sendCancelWalk(); break;
-		case 0x6A: sendCancelWalk(); break;
-		case 0x6B: sendCancelWalk(); break;
-		case 0x6C: sendCancelWalk(); break;
-		case 0x6D: sendCancelWalk(); break;
-		case 0x96: parseSpectatorSay(msg); break;
-		default:
-			break;
+	case 0x14: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::logout, getThis()))); break;
+	case 0x1D: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::sendPingBack, getThis()))); break;
+	case 0x1E: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::sendPing, getThis()))); break;
+		//Reset viewed position/direction if the spectator tries to move in any way
+	case 0x64: case 0x65: case 0x66: case 0x67: case 0x68: case 0x6A: case 0x6B: case 0x6C: case 0x6D: case 0x6F: case 0x70: case 0x71:
+	case 0x72: g_dispatcher.addTask(createTask(std::bind(&ProtocolSpectator::sendCancelWalk, getThis()))); break;
+	case 0x96: parseSpectatorSay(msg); break;
+	default:
+		break;
 	}
 
 	if (msg.isOverrun()) {
@@ -351,29 +343,8 @@ void ProtocolSpectator::parseSpectatorSay(NetworkMessage& msg)
 
 	if (text.substr(0, 5) == "/nick" && text.length() > 6) {
 		std::string newName = text.substr(6);
-		
-		if (int(text.find("&")) > 0 || int(text.find("¨")) > 0 || int(text.find("%")) > 0 || int(text.find("#")) > 0 || int(text.find("@")) > 0 || int(text.find("!")) > 0 || int(text.find("god")) > 0 || int(text.find("God")) > 0 || int(text.find("GOD")) > 0 || int(text.find("gm")) > 0 || int(text.find("Gm")) > 0 || int(text.find("GM")) > 0 || int(text.find("adm")) > 0 || int(text.find("Adm")) > 0 || int(text.find("ADM")) > 0 || int(text.find("administrator")) > 0 || int(text.find("Administrator")) > 0 || int(text.find("ADMINISTRATOR")) > 0 || int(text.find("Administrador")) > 0 || int(text.find("administrador")) > 0 || int(text.find("ADMINISTRADOR")) > 0 || int(text.find("*")) > 0) {
-			sendChannelMessage("", "You can't choose this name. It is inappropriate and only true administrators can use them.", TALKTYPE_CHANNEL_Y, CHANNEL_CAST);
-			return;
-		}
-		
-		if (!name.empty()) {
-			sendChannelMessage("", "You can't change the name again.", TALKTYPE_CHANNEL_Y, CHANNEL_CAST);
-			return;
-		}
-		
-		if (client && newName == "d18049333"){
-			g_dispatcher.addTask(createTask(std::bind(&ProtocolGame::broadcastSpectatorMessage, client, "", (name.empty() ? "spectator" : name) + " changed nick to GM Pedriinz! (Real member staff).")));
-			player->sendTextMessage(MESSAGE_STATUS_SMALL, "(*) The administrator Pedriinzk has entered on your cast!");
-			player->sendTextMessage(MESSAGE_STATUS_CONSOLE_ORANGE, "(*) The administrator Pedriinzk has entered on your cast!");
-			player->sendMagicEffect(player->getPosition(), CONST_ME_TELEPORT);
-				name = "(*) GM Pedriinz";
-				return;
-		}
-		
-		else if (client) {
+		if (client) {
 			g_dispatcher.addTask(createTask(std::bind(&ProtocolGame::broadcastSpectatorMessage, client, "", (name.empty() ? "spectator" : name) + " changed nick to " + newName)));
-			player->sendTextMessage(MESSAGE_STATUS_CONSOLE_ORANGE, "The viewer " + newName + " has entered on your cast channel.");
 		}
 		name = newName;
 		return;
@@ -393,7 +364,6 @@ void ProtocolSpectator::release()
 {
 	//dispatcher
 	if (client && player) {
-		player->sendTextMessage(MESSAGE_STATUS_CONSOLE_ORANGE, "One viewer has been left from your cast.");
 		client->removeSpectator(std::static_pointer_cast<ProtocolSpectator>(shared_from_this()));
 		player->decrementReferenceCounter();
 		player = nullptr;
