@@ -440,6 +440,20 @@ void Player::updateInventoryWeight()
 	}
 }
 
+int32_t Player::getPlayerInfo(playerinfo_t playerinfo) const
+{
+	switch (playerinfo) {
+		case PLAYERINFO_LEVELPERCENT: return levelPercent;
+		case PLAYERINFO_MAGICLEVEL: return std::max<int32_t>(0, magLevel + varStats[STAT_MAGICPOINTS]);
+		case PLAYERINFO_MAGICLEVELPERCENT: return magLevelPercent;
+		case PLAYERINFO_HEALTH: return health;
+		case PLAYERINFO_MAXHEALTH: return std::max<int32_t>(1, healthMax + varStats[STAT_MAXHITPOINTS]);
+		case PLAYERINFO_MANA: return mana;
+		case PLAYERINFO_MAXMANA: return std::max<int32_t>(0, manaMax + varStats[STAT_MAXMANAPOINTS]);
+		default: return 0;
+	}
+}
+
 void Player::addSkillAdvance(skills_t skill, uint64_t count)
 {
 	uint64_t currReqTries = vocation->getReqSkillTries(skill, skills[skill].level);
@@ -1935,8 +1949,8 @@ BlockType_t Player::blockHit(Creature* attacker, CombatType_t combatType, int32_
 						reflectDamage.primary.value = std::round(-damage * (reflectPercent / 100.));
 
 						Combat::doCombatHealth(this, attacker, reflectDamage, params);
-					}
-				}
+			}
+		}
 			}
 		}
 
@@ -3241,7 +3255,7 @@ bool Player::setAttackedCreature(Creature* creature)
 		return false;
 	}
 
-	if (chaseMode && creature) {
+	if (chaseMode == CHASEMODE_FOLLOW && creature) {
 		if (followCreature != creature) {
 			//chase opponent
 			setFollowCreature(creature);
@@ -3251,6 +3265,19 @@ bool Player::setAttackedCreature(Creature* creature)
 	}
 
 	if (creature) {
+		if (Monster* monster = creature->getMonster()) {
+			if (monster->isSummon()) {
+				if (Player* owner = monster->getMaster()->getPlayer()) {
+					if (owner != const_cast<Player*>(this)) {
+						addAttacked(owner);
+						addInFightTicks(true);
+						if (skull == SKULL_NONE && owner->skull == SKULL_NONE) {
+							setSkull(SKULL_WHITE);
+						}
+					}
+				}
+			}
+		}
 		g_dispatcher.addTask(createTask(std::bind(&Game::checkCreatureAttack, &g_game, getID())));
 	}
 	return true;
@@ -3331,13 +3358,13 @@ void Player::onFollowCreature(const Creature* creature)
 	}
 }
 
-void Player::setChaseMode(bool mode)
+void Player::setChaseMode(chaseMode_t mode)
 {
-	bool prevChaseMode = chaseMode;
+	chaseMode_t prevChaseMode = chaseMode;
 	chaseMode = mode;
 
 	if (prevChaseMode != chaseMode) {
-		if (chaseMode) {
+		if (chaseMode == CHASEMODE_FOLLOW) {
 			if (!followCreature && attackedCreature) {
 				//chase opponent
 				setFollowCreature(attackedCreature);
@@ -3503,7 +3530,7 @@ void Player::onAttackedCreature(Creature* target)
 {
 	Creature::onAttackedCreature(target);
 
-	if (target->getZone() == ZONE_PVP) {
+	if (target && target->getZone() == ZONE_PVP) {
 		return;
 	}
 
@@ -3535,7 +3562,7 @@ void Player::onAttackedCreature(Creature* target)
 			if (!Combat::isInPvpZone(this, targetPlayer) && !isInWar(targetPlayer)) {
 				addAttacked(targetPlayer);
 
-				if (targetPlayer->getSkull() == SKULL_NONE && getSkull() == SKULL_NONE && !targetPlayer->hasKilled(this)) {
+				if (targetPlayer->getSkull() == SKULL_NONE && getSkull() == SKULL_NONE) {
 					setSkull(SKULL_WHITE);
 				}
 
@@ -3571,8 +3598,6 @@ void Player::onPlacedCreature()
 	if (!g_creatureEvents->playerLogin(this)) {
 		kickPlayer(true);
 	}
-
-	sendUnjustifiedPoints();
 }
 
 void Player::onAttackedCreatureDrainHealth(Creature* target, int32_t points)
@@ -3625,16 +3650,7 @@ bool Player::onKilledCreature(Creature* target, bool lastHit/* = true*/)
 			targetPlayer->setLossSkill(false);
 		} else if (!hasFlag(PlayerFlag_NotGainInFight) && !isPartner(targetPlayer)) {
 			if (!Combat::isInPvpZone(this, targetPlayer) && hasAttacked(targetPlayer) && !targetPlayer->hasAttacked(this) && !isGuildMate(targetPlayer) && targetPlayer != this) {
-				if (targetPlayer->hasKilled(this)) {
-					for (auto& kill : targetPlayer->unjustifiedKills) {
-						if (kill.target == getGUID() && kill.unavenged) {
-							kill.unavenged = false;
-							auto it = attackedSet.find(targetPlayer->guid);
-							attackedSet.erase(it);
-							break;
-						}
-					}
-				} else if (targetPlayer->getSkull() == SKULL_NONE && !isInWar(targetPlayer)) {
+				if (targetPlayer->getSkull() == SKULL_NONE && !isInWar(targetPlayer)) {
 					unjustified = true;
 					addUnjustifiedDead(targetPlayer);
 				}
@@ -3879,24 +3895,12 @@ Skulls_t Player::getSkullClient(const Creature* creature) const
 
 	const Player* player = creature->getPlayer();
 	if (player && player->getSkull() == SKULL_NONE) {
-		if (player == this) {
-			for (const auto& kill : unjustifiedKills) {
-				if (kill.unavenged && (time(nullptr) - kill.time) < g_config.getNumber(ConfigManager::ORANGE_SKULL_DURATION) * 24 * 60 * 60) {
-					return SKULL_ORANGE;
-				}
-			}
-		}
-
 		if (isInWar(player)) {
 			return SKULL_GREEN;
 		}
 
 		if (!player->getGuildWarList().empty() && guild == player->getGuild()) {
 			return SKULL_GREEN;
-		}
-
-		if (player->hasKilled(this)) {
-			return SKULL_ORANGE;
 		}
 
 		if (player->hasAttacked(this)) {
@@ -3908,17 +3912,6 @@ Skulls_t Player::getSkullClient(const Creature* creature) const
 		}
 	}
 	return Creature::getSkullClient(creature);
-}
-
-bool Player::hasKilled(const Player* player) const
-{
-	for (const auto& kill : unjustifiedKills) {
-		if (kill.target == player->getGUID() && (time(nullptr) - kill.time) < g_config.getNumber(ConfigManager::ORANGE_SKULL_DURATION) * 24 * 60 * 60 && kill.unavenged) {
-			return true;
-		}
-	}
-
-	return false;
 }
 
 bool Player::hasAttacked(const Player* attacked) const
@@ -3952,43 +3945,26 @@ void Player::addUnjustifiedDead(const Player* attacked)
 
 	sendTextMessage(MESSAGE_EVENT_ADVANCE, "Warning! The murder of " + attacked->getName() + " was not justified.");
 
-	unjustifiedKills.emplace_back(attacked->getGUID(), time(nullptr), true);
-
-	uint8_t dayKills = 0;
-	uint8_t weekKills = 0;
-	uint8_t monthKills = 0;
-
-	for (const auto& kill : unjustifiedKills) {
-		const auto diff = time(nullptr) - kill.time;
-		if (diff <= 24 * 60 * 60) {
-			dayKills += 1;
-		}
-		if (diff <= 7 * 24 * 60 * 60) {
-			weekKills += 1;
-		}
-		if (diff <= 30 * 24 * 60 * 60) {
-			monthKills += 1;
-		}
-	}
+	skullTicks += g_config.getNumber(ConfigManager::FRAG_TIME);
 
 	if (getSkull() != SKULL_BLACK) {
-		if (dayKills >= 2 * g_config.getNumber(ConfigManager::DAY_KILLS_TO_RED) || weekKills >= 2 * g_config.getNumber(ConfigManager::WEEK_KILLS_TO_RED) || monthKills >= 2 * g_config.getNumber(ConfigManager::MONTH_KILLS_TO_RED)) {
+		if (g_config.getNumber(ConfigManager::KILLS_TO_BLACK) != 0 && skullTicks > (g_config.getNumber(ConfigManager::KILLS_TO_BLACK) - 1) * static_cast<int64_t>(g_config.getNumber(ConfigManager::FRAG_TIME))) {
 			setSkull(SKULL_BLACK);
-			//start black skull time
-			skullTicks = static_cast<int64_t>(g_config.getNumber(ConfigManager::BLACK_SKULL_DURATION)) * 24 * 60 * 60 * 1000;
-		} else if (dayKills >= g_config.getNumber(ConfigManager::DAY_KILLS_TO_RED) || weekKills >= g_config.getNumber(ConfigManager::WEEK_KILLS_TO_RED) || monthKills >= g_config.getNumber(ConfigManager::MONTH_KILLS_TO_RED)) {
+		} else if (getSkull() != SKULL_RED && g_config.getNumber(ConfigManager::KILLS_TO_RED) != 0 && skullTicks > (g_config.getNumber(ConfigManager::KILLS_TO_RED) - 1) * static_cast<int64_t>(g_config.getNumber(ConfigManager::FRAG_TIME))) {
 			setSkull(SKULL_RED);
-			//reset red skull time
-			skullTicks = static_cast<int64_t>(g_config.getNumber(ConfigManager::RED_SKULL_DURATION)) * 24 * 60 * 60 * 1000;
 		}
 	}
 
-	sendUnjustifiedPoints();
+	if (!client) {
+		return;
+	}
+
+	client->sendSkullTime();
 }
 
 void Player::checkSkullTicks(int32_t ticks)
 {
-	int64_t newTicks = skullTicks - ticks;
+	int32_t newTicks = skullTicks - ticks;
 	if (newTicks < 0) {
 		skullTicks = 0;
 	} else {
@@ -4232,43 +4208,6 @@ GuildEmblems_t Player::getGuildEmblem(const Player* player) const
 	}
 
 	return GUILDEMBLEM_NEUTRAL;
-}
-
-void Player::sendUnjustifiedPoints()
-{
-	if (client) {
-		double dayKills = 0;
-		double weekKills = 0;
-		double monthKills = 0;
-
-		for (const auto& kill : unjustifiedKills) {
-			const auto diff = time(nullptr) - kill.time;
-			if (diff <= 24 * 60 * 60) {
-				dayKills += 1;
-			}
-			if (diff <= 7 * 24 * 60 * 60) {
-				weekKills += 1;
-			}
-			if (diff <= 30 * 24 * 60 * 60) {
-				monthKills += 1;
-			}
-		}
-
-		bool isRed = getSkull() == SKULL_RED;
-
-		auto dayMax = ((isRed ? 2 : 1) * g_config.getNumber(ConfigManager::DAY_KILLS_TO_RED));
-		auto weekMax = ((isRed ? 2 : 1) * g_config.getNumber(ConfigManager::WEEK_KILLS_TO_RED));
-		auto monthMax = ((isRed ? 2 : 1) * g_config.getNumber(ConfigManager::MONTH_KILLS_TO_RED));		
-
-		uint8_t dayProgress = std::min(std::round(dayKills / dayMax * 100), 100.0);
-		uint8_t weekProgress = std::min(std::round(weekKills / weekMax * 100), 100.0);
-		uint8_t monthProgress = std::min(std::round(monthKills / monthMax * 100), 100.0);
-		uint8_t skullDuration = 0;
-		if (skullTicks != 0) {
-			skullDuration = std::floor<uint8_t>(skullTicks / (24 * 60 * 60 * 1000));
-		}
-		client->sendUnjustifiedPoints(dayProgress, std::max(dayMax - dayKills, 0.0), weekProgress, std::max(weekMax - weekKills, 0.0), monthProgress, std::max(monthMax - monthKills, 0.0), skullDuration);
-	}
 }
 
 uint8_t Player::getCurrentMount() const
